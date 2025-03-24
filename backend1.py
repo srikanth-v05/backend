@@ -326,57 +326,67 @@ def get_conversation(id):
         return jsonify({"messages": messages})
     except sqlite3.Error as e:
         return jsonify({"error": str(e)}), 500
-    
 
 @app.route("/generate_chart", methods=["POST"])
 def generate_chart():
-    """ Handle chart generation request """
-    data = request.json
-    chart_type = data.get("chart_type", "bar")
-    num_rows = data.get("num_rows", "All")
-    table = data.get("table", [])
-    print(data,type(num_rows))
-    df=pd.DataFrame(table)
-    rowt=len(df)
-    if num_rows.lower() == "all":
-        if rowt > 50:
-            # Display a warning if the number of rows exceeds 50 for any chart type
-            if chart_type in ["Histogram", "Bar Chart", "Line Chart", "Pie Chart"]:
-                return jsonify({"warning": f"{chart_type} cannot display more than 50 rows. Your dataset has {rowt} rows."}), 200    
-    #ques = f"Visualize the data as a {ques} using {num_rows} rows."
-    ques = f"Create a {chart_type} using {'all rows' if num_rows.lower() == 'all' else f'the {num_rows} rows'} of the dataset, analyse the data and put a meaningful chart"
+    """ Handle chart generation request with error handling """
+    try:
+        # Parse JSON input safely
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            return jsonify({"error": "Invalid or missing JSON payload"}), 400
 
-    df = SmartDataframe(df, config={"llm": llm})
-    result = df.chat(ques)
+        chart_type = data.get("chart_type", "bar")
+        num_rows = data.get("num_rows", "All")
+        table = data.get("table", [])
 
-    if isinstance(result, str):
-        print("string")
-        # Check if result is a valid file path
-        if os.path.isfile(result):
-            # Define destination path
-            dest_path = f"static/img/visualization.png"
-            
-            # Ensure the static/img directory exists
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            
-            # Copy the file to the static directory
-            shutil.copy(result, dest_path)
-            
-            print("Saved visualization at:", dest_path)
-            visualization=dest_path
-    elif isinstance(result, plt.Figure):
-        # Define save path
-        # Save figure to 
-        image_path=f"static/img/visualization.png"
-        result.savefig(image_path, format="png")
+        if not isinstance(table, list) or len(table) == 0:
+            return jsonify({"error": "Table data is missing or not in correct format"}), 400
 
-        visualization = image_path
-    else:
-        visualization = "Unsupported response type."
+        print(f"Received data: {data}, num_rows type: {type(num_rows)}")
 
+        # Convert table data to DataFrame
+        df = pd.DataFrame(table)
+        row_count = len(df)
 
-    return jsonify({"status": "success", "visualization": visualization})
+        # Validate row count for certain chart types
+        if isinstance(num_rows, str) and num_rows.lower() == "all":
+            if row_count > 50 and chart_type in ["Histogram", "Bar Chart", "Line Chart", "Pie Chart"]:
+                return jsonify({"warning": f"{chart_type} cannot display more than 50 rows. Your dataset has {row_count} rows."}), 200
 
+        # Generate the prompt for the AI-based chart generation
+        ques = f"Create a {chart_type} using {'all rows' if str(num_rows).lower() == 'all' else f'the {num_rows} rows'} of the dataset, analyze the data and generate a meaningful chart."
+
+        # AI-Based Smart DataFrame Processing
+        df = SmartDataframe(df, config={"llm": llm})
+
+        try:
+            result = df.chat(ques)
+        except Exception as ai_error:
+            return jsonify({"error": f"AI processing failed: {str(ai_error)}"}), 500
+
+        visualization = None
+
+        if isinstance(result, str):
+            print("Result is a string.")
+            if os.path.isfile(result):  # Check if result is a valid file path
+                dest_path = "static/img/visualization.png"
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.copy(result, dest_path)
+                print("Saved visualization at:", dest_path)
+                visualization = dest_path
+        elif isinstance(result, plt.Figure):
+            image_path = "static/img/visualization.png"
+            result.savefig(image_path, format="png")
+            visualization = image_path
+        else:
+            visualization = "Unsupported response type."
+
+        return jsonify({"status": "success", "visualization": visualization})
+
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
 
 @app.route("/clear_conversation", methods=["POST"])
 def clear_conversation():
