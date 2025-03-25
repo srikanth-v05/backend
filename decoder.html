@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Base64 Image Decoder</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin: 20px; }
+        textarea { width: 100%; height: 150px; }
+        img { margin-top: 20px; max-width: 100%; height: auto; border: 1px solid #ddd; padding: 5px; }
+    </style>
+</head>
+<body>
+    <h2>Base64 Image Decoder</h2>
+    <textarea id="base64Input" placeholder="Paste Base64 string here..."></textarea>
+    <br>
+    <button onclick="decodeBase64()">Decode Image</button>
+    <br>
+    <img id="outputImage" alt="Decoded Image will appear here">
+    
+    <script>
+        function decodeBase64() {
+            let base64String = document.getElementById("base64Input").value.trim();
+            if (!base64String.startsWith("data:image")) {
+                base64String = "data:image/png;base64," + base64String; // Assume PNG if missing
+            }
+            document.getElementById("outputImage").src = base64String;
+        }
+    </script>
+</body>
+</html>
