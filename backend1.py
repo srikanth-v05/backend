@@ -11,8 +11,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from langchain_community.chat_models import ChatOpenAI
 import os
-import shutil
+import base64
+import io
 import logging
+import matplotlib
+matplotlib.use('Agg')  # Prevents GUI errors
+
 # Load environment variables
 load_dotenv()
 
@@ -354,7 +358,7 @@ def generate_chart():
             if row_count > 50 and chart_type in ["Histogram", "Bar Chart", "Line Chart", "Pie Chart"]:
                 return jsonify({"warning": f"{chart_type} cannot display more than 50 rows. Your dataset has {row_count} rows."}), 200
 
-        # Generate the prompt for the AI-based chart generation
+        # Generate the prompt for AI-based chart generation
         ques = f"Create a {chart_type} using {'all rows' if str(num_rows).lower() == 'all' else f'the {num_rows} rows'} of the dataset, analyze the data and generate a meaningful chart."
 
         # AI-Based Smart DataFrame Processing
@@ -365,28 +369,26 @@ def generate_chart():
         except Exception as ai_error:
             return jsonify({"error": f"AI processing failed: {str(ai_error)}"}), 500
 
-        visualization = None
+        encoded_image = None
 
         if isinstance(result, str):
             print("Result is a string.")
             if os.path.isfile(result):  # Check if result is a valid file path
-                dest_path = "static/img/visualization.png"
-                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                shutil.copy(result, dest_path)
-                print("Saved visualization at:", dest_path)
-                visualization = dest_path
+                with open(result, "rb") as image_file:
+                    encoded_image = base64.b64encode(image_file.read()).decode("utf-8")
         elif isinstance(result, plt.Figure):
-            image_path = "static/img/visualization.png"
-            result.savefig(image_path, format="png")
-            visualization = image_path
-        else:
-            visualization = "Unsupported response type."
+            buf = io.BytesIO()
+            result.savefig(buf, format="png")
+            buf.seek(0)
+            encoded_image = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-        return jsonify({"status": "success", "visualization": visualization})
+        if not encoded_image:
+            return jsonify({"error": "Unsupported response type."}), 500
+
+        return jsonify({"status": "success", "image": encoded_image})
 
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
-        return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 @app.route("/clear_conversation", methods=["POST"])
 def clear_conversation():
