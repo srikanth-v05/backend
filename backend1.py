@@ -14,13 +14,21 @@ import os
 import base64
 import io
 import logging
+from flask_cors import CORS 
 import matplotlib
+from datetime import datetime, timedelta
+
 matplotlib.use('Agg')  # Prevents GUI errors
+
+
+
+
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
 openai.api_key = os.getenv("OPEN_API_KEY")
 llm = ChatOpenAI(model_name="gpt-4", openai_api_key=os.getenv("OPEN_API_KEY"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -35,6 +43,9 @@ SNOWFLAKE_CONFIG = {
     "schema":'SALES',
 }
 
+
+
+
 def init_db():
     with closing(sqlite3.connect("database.db")) as conn, closing(conn.cursor()) as cursor:
         cursor.executescript('''
@@ -48,11 +59,17 @@ def init_db():
                 conversation_id INTEGER,
                 role TEXT,
                 content TEXT,
+                type_of_query TEXT,
                 timestamp TEXT,
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
         ''')
         conn.commit()
+
+
+
+
+
 
 # Snowflake connection management
 def get_snowflake_connection():
@@ -61,7 +78,13 @@ def get_snowflake_connection():
     except snowflake.connector.errors.Error as e:
         logging.error(f"Snowflake connection error: {e}")
         return None
-def execute_snowflake_query(query):
+
+
+
+
+
+
+def execute_snowflake_query(query,row=None):
     conn = get_snowflake_connection()
     if not conn:
         return {"error": "Failed to connect to Snowflake."}, 500
@@ -70,8 +93,10 @@ def execute_snowflake_query(query):
         with conn.cursor() as cursor:
             cursor.execute(query)
             columns = [desc[0] for desc in cursor.description]  # Extract column names
-            results = cursor.fetchall()
-            
+            if row:
+                results = cursor.fetchall()[:row]
+            else:
+                results = cursor.fetchall()
             # Convert results into list of dictionaries (column_name -> value)
             formatted_results = [dict(zip(columns, row)) for row in results]
 
@@ -86,16 +111,28 @@ def execute_snowflake_query(query):
         conn.close()
 
 
-def save_message(conversation_id, role, content):
+
+
+
+
+
+def save_message(conversation_id, role, content,type="system"):
     try:
         with closing(sqlite3.connect("database.db")) as conn, closing(conn.cursor()) as cursor:
             cursor.execute("""
-                INSERT INTO messages (conversation_id, role, content, timestamp)
-                VALUES (?, ?, ?, ?)
-            """, (conversation_id, role, content, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                INSERT INTO messages (conversation_id, role, content, timestamp,type_of_query)
+                VALUES (?, ?, ?, ?, ?)
+            """, (conversation_id, role, content, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),type))
             conn.commit()
     except sqlite3.Error as e:
         print(f"Database error: {e}")
+
+
+
+
+
+
+
 
 
 # Define the system message to guide the model
@@ -115,6 +152,7 @@ INSTRUCTIONS: Analyze the database schema and generate the SQL query accordingly
 - USER QUERY CHECK:When the user asks a question, check if the question is related to the schema.
 - SQL INJECTION: IF user for any sql injection queries return "Permission denied"
 - QUERY VALIDATION: Validate the query to ensure it is syntactically correct.
+- QUERY RELEVANCE: when the user's specified table or any other value doesn't seem to be available in the provided schema reply with a set of similarity based recommendation.
 - ABOUT DATABASE: This is a supermarket database where all tables are linked. If the user does not mention a table name in their query, intelligently determine the most relevant table(s) based on the context before generating the SQL query.
 
 Database Schema:
@@ -277,6 +315,10 @@ AI: SHOW TABLES;
 """
 
 
+
+
+
+
 @app.route("/start_conversation", methods=["POST"])
 def start_conversation():
     try:
@@ -289,54 +331,162 @@ def start_conversation():
     except sqlite3.Error as e:
         return jsonify({"error": str(e)}), 500
 
+
+
+
+
+@app.route("/conversation_history", methods=["GET"])
+def get_conversation_history():
+    try:
+        num_weeks = int(request.args.get("weeks", 5))  # Default to last 5 weeks
+        today = datetime.today()
+        start_of_this_week = today - timedelta(days=today.weekday())
+
+        with sqlite3.connect("database.db") as conn:
+            cursor = conn.cursor()
+            
+            # Fetch all conversations within the last N weeks
+            min_date = start_of_this_week - timedelta(weeks=num_weeks)
+            query = """
+                SELECT id, title, timestamp FROM conversations
+                WHERE timestamp >= ?
+                ORDER BY timestamp DESC
+            """
+            cursor.execute(query, (min_date.strftime("%Y-%m-%d"),))
+            rows = cursor.fetchall()
+
+            history = {}
+
+            for conv_id, title, timestamp in rows:
+                conv_date = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+
+                for i in range(num_weeks):
+                    week_start = start_of_this_week - timedelta(weeks=i)
+                    week_end = week_start + timedelta(days=7)
+
+                    if week_start <= conv_date < week_end:
+                        week_label = "this_week" if i == 0 else f"{i}_weeks_ago"
+                        if week_label not in history:
+                            history[week_label] = []
+                        history[week_label].append([conv_id, title])
+                        break  # Stop checking after finding the correct week
+
+            return jsonify(history)
+
+    except sqlite3.Error as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+
+
 @app.route("/generate_sql", methods=["POST"])
 def generate_sql():
     conversation_id = request.json.get("conversation_id")
     user_query = request.json.get("query")
-    if conversation_id:
-        save_message(conversation_id, "user", user_query)
-    else:
+
+    if not conversation_id:
+        # Create a new conversation if no conversation_id is provided
         with closing(sqlite3.connect("database.db")) as conn, closing(conn.cursor()) as cursor:
             cursor.execute("INSERT INTO conversations (title, timestamp) VALUES (?, ?)",
                            (request.json.get("title", "New Conversation"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             conversation_id = cursor.lastrowid
             conn.commit()
-        save_message(conversation_id, "user", user_query)
-    
+
+    # Retrieve past conversation messages
+    messages = get_conversation1(conversation_id)
+
+    # If no previous messages, start with system message
+    if not messages:
+        save_message(conversation_id, "system", SYSTEM_MESSAGE, "system")
+
+    # Append user query
+    save_message(conversation_id, "user", user_query, "query")
+    messages.append({"role": "user", "content": user_query})
+
     try:
+        # Call OpenAI API to generate SQL query
         response = openai.ChatCompletion.create(
             model="gpt-4o",
-            messages=[
-                {"role": "system", "content": SYSTEM_MESSAGE},
-                {"role": "user", "content": user_query}
-            ],
+            messages=messages,  # Must be a list of dicts
             temperature=0.25
         )
+
         sql_query = response["choices"][0]["message"]["content"].strip()
-        save_message(conversation_id, "bot", sql_query)
-        return jsonify({"conversation_id":conversation_id,"sql": sql_query})
+
+        # Determine message type and save it
+        query_type = "query" if sql_query.lower().startswith(("select", "show", "with")) else "message"
+        save_message(conversation_id, "system", sql_query, query_type)
+
+        return jsonify({"conversation_id": conversation_id, "sql": sql_query})
+
     except openai.error.OpenAIError as e:
         return jsonify({"error": str(e)}), 500
+
+def get_conversation1(conversation_id):
+    """Retrieve messages from the database and format them correctly for OpenAI API."""
+    try:
+        with closing(sqlite3.connect("database.db")) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute("""
+                SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id
+            """, (conversation_id,))
+            messages = cursor.fetchall()
+        
+        # Convert tuples into a list of dicts
+        formatted_messages = [{"role": row[0], "content": row[1]} for row in messages]
+
+        return formatted_messages  # ✅ Correctly formatted for OpenAI
+    except sqlite3.Error:
+        return []
+
+
+
+
+
+
 
 @app.route("/execute_query", methods=["POST"])
 def execute_query():
     sql_query = request.json.get("query")
-    if not sql_query.lower().startswith("select"):
+    row = request.json.get("row_count")
+    if not (sql_query.lower().startswith("select") or sql_query.lower().startswith("show") or sql_query.lower().startswith("with")):
         return jsonify({"error": "Only SELECT queries are allowed."}), 400
-    response = execute_snowflake_query(sql_query)
+    response = execute_snowflake_query(sql_query,row)  # Execute query
     return jsonify(response)
+
+
+
+
+
+
+
 
 @app.route("/conversation/<int:id>", methods=["GET"])
 def get_conversation(id):
     try:
         with closing(sqlite3.connect("database.db")) as conn, closing(conn.cursor()) as cursor:
             cursor.execute("""
-                SELECT id, role, content, timestamp FROM messages WHERE conversation_id = ? ORDER BY id
+                SELECT id, role, content, timestamp,type_of_query FROM messages WHERE conversation_id = ? ORDER BY id
             """, (id,))
             messages = cursor.fetchall()
         return jsonify({"messages": messages})
     except sqlite3.Error as e:
         return jsonify({"error": str(e)}), 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 @app.route("/generate_chart", methods=["POST"])
 def generate_chart():
@@ -349,8 +499,8 @@ def generate_chart():
 
         chart_type = data.get("chart_type", "bar")
         num_rows = data.get("num_rows", "All")
-        table = data.get("table", [])
-
+        query1 = data.get("query")
+        table=execute_snowflake_query(query1)
         if not isinstance(table, list) or len(table) == 0:
             return jsonify({"error": "Table data is missing or not in correct format"}), 400
 
@@ -397,6 +547,22 @@ def generate_chart():
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @app.route("/clear_conversation", methods=["POST"])
 def clear_conversation():
     conversation_id = request.json.get("conversation_id")
@@ -412,6 +578,23 @@ def clear_conversation():
         return jsonify({"message": "Conversation and linked messages deleted."})
     except sqlite3.Error as e:
         return jsonify({"error": str(e)}), 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 if __name__ == "__main__":
     init_db()
